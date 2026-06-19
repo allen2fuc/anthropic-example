@@ -4,7 +4,7 @@ import uuid
 from typing import Optional, Annotated, TypedDict, cast
 from contextlib import asynccontextmanager
 import logging
-from httpx import Client
+from httpx import Client, Timeout
 from threading import Lock
 from anthropic import Anthropic
 from fastapi import FastAPI, Request, Depends, Response, status, HTTPException
@@ -114,21 +114,29 @@ class ProviderStore:
                 self._provider = ProviderPublic(**provider.model_dump())
                 return self._provider
 
-def get_anthropic_api(provider: ProviderPublic, http_client: Client) -> Anthropic:
+def get_anthropic_api(request: Request) -> Anthropic:
+    state = cast(State, request.state)
+    provider = state.provider_store.get_provider()
+    http_client = state.http_client
     return Anthropic(api_key=provider.api_key, http_client=http_client)
 
 # ---------------------------------- fastapi --------------------------------
 class State(TypedDict):
     engine: Engine
+    provider_store: ProviderStore
+    http_client: Client
  
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting up...")
     engine = create_engine(DB_URL, echo=DB_ECHO, connect_args={"check_same_thread": False})
     SQLModel.metadata.create_all(engine)
-    yield State(engine=engine)
+    http_client = Client(timeout=Timeout(connect=10.0, read=300.0, write=30.0, pool=10.0))
+    provider_store = ProviderStore(engine)
+    yield State(engine=engine, provider_store=provider_store, http_client=http_client)
     logger.info("Shutting down...")
     engine.dispose()
+    http_client.close()
 
 app = FastAPI(title="AI Chat API", description="AI Chat API", lifespan=lifespan)
 
