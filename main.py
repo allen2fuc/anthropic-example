@@ -1,11 +1,21 @@
-from sqlmodel import SQLModel, Field, Relationship, Column, DateTime, ForeignKey
+from sqlmodel import SQLModel, Field, Relationship, Column, DateTime, ForeignKey, Session, create_engine
 from datetime import datetime
 import uuid
-from typing import Optional, Annotated
+from typing import Optional, Annotated, TypedDict, cast
+from contextlib import asynccontextmanager
 import logging
+
+from fastapi import FastAPI, Request, Depends
+from sqlalchemy.engine import Engine
+
+
+DB_URL = "sqlite:///sqlite.db"
+DB_ECHO = False
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
+
+# ---------------------------------- schema --------------------------------
 
 class ChatBase(SQLModel):
     title: Annotated[str, Field(default="New Chat", description="聊天标题")]
@@ -44,3 +54,31 @@ class MessagePublic(MessageBase):
     id: uuid.UUID
     chat_id: uuid.UUID
     created_at: datetime
+
+
+# ---------------------------------- fastapi --------------------------------
+class State(TypedDict):
+    engine: Engine
+ 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting up...")
+    engine = create_engine(DB_URL, echo=DB_ECHO, connect_args={"check_same_thread": False})
+    yield State(engine=engine)
+    logger.info("Shutting down...")
+    engine.dispose()
+
+app = FastAPI(title="AI Chat API", description="AI Chat API", lifespan=lifespan)
+
+def get_session(request: Request):
+    state = cast(State, request.state)
+    with Session(state.engine) as session:
+        yield session
+
+SessionDep = Annotated[Session, Depends(get_session)]
+
+# ---------------------------------- endpoints --------------------------------
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
