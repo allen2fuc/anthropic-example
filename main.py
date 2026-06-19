@@ -5,12 +5,12 @@ from typing import Optional, Annotated, TypedDict, cast
 from contextlib import asynccontextmanager
 import logging
 
-from fastapi import FastAPI, Request, Depends, status, HTTPException
+from fastapi import FastAPI, Request, Depends, Response, status, HTTPException
 from sqlalchemy.engine import Engine
 
 
 DB_URL = "sqlite:///sqlite.db"
-DB_ECHO = False
+DB_ECHO = True
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger(__name__)
@@ -25,7 +25,7 @@ class Chat(ChatBase, table=True):
     id: Annotated[uuid.UUID, Field(default_factory=uuid.uuid4, primary_key=True)]
     created_at: Annotated[datetime, Field(default_factory=datetime.now)]
     updated_at: Annotated[datetime, Field(default_factory=datetime.now, sa_column=Column(DateTime, onupdate=datetime.now))]
-    messages: list["Message"] = Relationship(back_populates="chat", sa_relationship_kwargs={"lazy": "selectin", "cascade": "all, delete-orphan", "passive_deletes": True})
+    messages: list["Message"] = Relationship(back_populates="chat", sa_relationship_kwargs={"lazy": "selectin", "cascade": "all, delete-orphan", "order_by": "Message.created_at"})
 
 class ChatCreate(ChatBase):
     pass
@@ -35,6 +35,11 @@ class ChatUpdate(ChatBase):
 
 class ChatPublic(ChatBase):
     id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+class ChatDetail(ChatPublic):
+    messages: Annotated[list["MessagePublic"], Field(description="聊天消息")]
 
 class MessageBase(SQLModel):
     role: Annotated[str, Field(description="角色")]
@@ -43,12 +48,12 @@ class MessageBase(SQLModel):
 class Message(MessageBase, table=True):
     __tablename__ = "ai_messages"
     id: Annotated[uuid.UUID, Field(default_factory=uuid.uuid4, primary_key=True)]
-    chat_id: Annotated[uuid.UUID, Field(sa_column=Column(ForeignKey("ai_chats.id", ondelete="CASCADE"), comment="聊天ID"))]
+    chat_id: Annotated[uuid.UUID, Field(sa_column=Column(ForeignKey("ai_chats.id", ondelete="CASCADE"), nullable=False, comment="聊天ID"))]
     created_at: Annotated[datetime, Field(default_factory=datetime.now, description="创建时间")]   
     chat: Chat = Relationship(back_populates="messages")
 
 class MessageCreate(MessageBase):
-    chat_id: Annotated[uuid.UUID, Field(description="聊天ID")]
+    pass
 
 class MessagePublic(MessageBase):
     id: uuid.UUID
@@ -97,11 +102,41 @@ async def create_chat(chat: ChatCreate, session: SessionDep):
     session.refresh(chat)
     return chat
 
+@app.get("/api/v1/chats/{chat_id}", response_model=ChatDetail)
+async def get_chat(chat_id: uuid.UUID, session: SessionDep):
+    chat = session.get(Chat, chat_id)
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    return chat
+
 @app.patch("/api/v1/chats/{chat_id}", response_model=ChatPublic)
 async def update_chat(chat_id: uuid.UUID, data: ChatUpdate, session: SessionDep):
     chat = session.get(Chat, chat_id)
     if not chat:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    update_data = data.model_dump(exclude_unset=True)
+    chat.sqlmodel_update(update_data)
+    session.add(chat)
     session.commit()
     session.refresh(chat)
     return chat
+
+@app.delete("/api/v1/chats/{chat_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_chat(chat_id: uuid.UUID, session: SessionDep):
+    chat = session.get(Chat, chat_id)
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    session.delete(chat)
+    session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@app.post("/api/v1/chats/{chat_id}/messages", response_model=MessagePublic)
+async def create_message(chat_id: uuid.UUID, message: MessageCreate, session: SessionDep):
+    chat = session.get(Chat, chat_id)
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    message = Message(chat_id=chat_id, **message.model_dump())
+    session.add(message)
+    session.commit()
+    session.refresh(message)
+    return message
