@@ -4,7 +4,9 @@ import uuid
 from typing import Optional, Annotated, TypedDict, cast
 from contextlib import asynccontextmanager
 import logging
-
+from httpx import Client
+from threading import Lock
+from anthropic import Anthropic
 from fastapi import FastAPI, Request, Depends, Response, status, HTTPException
 from sqlalchemy.engine import Engine
 
@@ -60,6 +62,60 @@ class MessagePublic(MessageBase):
     chat_id: uuid.UUID
     created_at: datetime
 
+
+# ---------------------------------- ai --------------------------------
+class ProviderBase(SQLModel):
+    base_url: Annotated[str, Field(description="AI API基础URL")]
+    api_key: Annotated[str, Field(description="AI API密钥")]
+    model: Annotated[str, Field(description="AI模型")]
+    max_tokens: Annotated[int, Field(description="最大Token数")]
+    enabled: Annotated[bool, Field(description="是否启用")]
+
+class Provider(ProviderBase, table=True):
+    __tablename__ = "ai_providers"
+    id: Annotated[uuid.UUID, Field(default_factory=uuid.uuid4, primary_key=True)]
+    created_at: Annotated[datetime, Field(default_factory=datetime.now)]
+    updated_at: Annotated[datetime, Field(default_factory=datetime.now, sa_column=Column(DateTime, onupdate=datetime.now))]
+
+class ProviderCreate(ProviderBase):
+    pass
+
+class ProviderUpdate(ProviderBase):
+    base_url: Optional[str] = None
+    api_key: Optional[str] = None
+    model: Optional[str] = None
+    max_tokens: Optional[int] = None
+    enabled: Optional[bool] = None
+
+class ProviderPublic(ProviderBase):
+    id: uuid.UUID
+    created_at: datetime
+    updated_at: datetime
+
+class ProviderStore:
+    def __init__(self, db_engine: Engine):
+        self._db_engine = db_engine
+        self._lock = Lock()
+        self._provider: ProviderPublic | None = None
+        self.reload()
+
+    def get_provider(self) -> ProviderPublic:
+        if not self._provider:
+            self.reload()
+        return self._provider
+
+    def reload(self) -> ProviderPublic:
+        with self._lock:
+            with Session(self._db_engine) as session:
+                stmt = select(Provider).where(Provider.enabled.is_(True)).order_by(Provider.created_at.desc())
+                provider = session.exec(stmt).first()
+                if not provider:
+                    raise ValueError("No available provider")
+                self._provider = ProviderPublic(**provider.model_dump())
+                return self._provider
+
+def get_anthropic_api(provider: ProviderPublic, http_client: Client) -> Anthropic:
+    return Anthropic(api_key=provider.api_key, http_client=http_client)
 
 # ---------------------------------- fastapi --------------------------------
 class State(TypedDict):
