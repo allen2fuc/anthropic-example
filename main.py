@@ -1,11 +1,11 @@
-from sqlmodel import SQLModel, Field, Relationship, Column, DateTime, ForeignKey, Session, create_engine
+from sqlmodel import SQLModel, Field, Relationship, Column, DateTime, ForeignKey, Session, create_engine, select
 from datetime import datetime
 import uuid
 from typing import Optional, Annotated, TypedDict, cast
 from contextlib import asynccontextmanager
 import logging
 
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request, Depends, status, HTTPException
 from sqlalchemy.engine import Engine
 
 
@@ -64,6 +64,7 @@ class State(TypedDict):
 async def lifespan(app: FastAPI):
     logger.info("Starting up...")
     engine = create_engine(DB_URL, echo=DB_ECHO, connect_args={"check_same_thread": False})
+    SQLModel.metadata.create_all(engine)
     yield State(engine=engine)
     logger.info("Shutting down...")
     engine.dispose()
@@ -82,3 +83,25 @@ SessionDep = Annotated[Session, Depends(get_session)]
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+@app.get("/api/v1/chats", response_model=list[ChatPublic])
+async def get_chats(session: SessionDep):
+    chats = session.exec(select(Chat)).all()
+    return chats
+
+@app.post("/api/v1/chats", response_model=ChatPublic)
+async def create_chat(chat: ChatCreate, session: SessionDep):
+    chat = Chat(title=chat.title)
+    session.add(chat)
+    session.commit()
+    session.refresh(chat)
+    return chat
+
+@app.patch("/api/v1/chats/{chat_id}", response_model=ChatPublic)
+async def update_chat(chat_id: uuid.UUID, data: ChatUpdate, session: SessionDep):
+    chat = session.get(Chat, chat_id)
+    if not chat:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
+    session.commit()
+    session.refresh(chat)
+    return chat
