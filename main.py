@@ -1,3 +1,4 @@
+from functools import cache
 from sqlmodel import SQLModel, Field, Relationship, Column, DateTime, ForeignKey, Session, create_engine, select
 from datetime import datetime
 import uuid
@@ -64,55 +65,62 @@ class MessagePublic(MessageBase):
 
 
 # ---------------------------------- ai --------------------------------
-class ProviderBase(SQLModel):
-    base_url: Annotated[str, Field(description="AI API基础URL")]
-    api_key: Annotated[str, Field(description="AI API密钥")]
-    model: Annotated[str, Field(description="AI模型")]
-    max_tokens: Annotated[int, Field(description="最大Token数")]
-    enabled: Annotated[bool, Field(description="是否启用")]
+AI_PROVIDER_GROUP = "ai_provider"
+class DBSettingsBase(SQLModel):
+    key: Annotated[str, Field(description="设置键")]
+    value: Annotated[str, Field(description="设置值")]
+    group: Annotated[str, Field(description="设置组")]
+    order: Annotated[int, Field(description="排序")]
 
-class Provider(ProviderBase, table=True):
-    __tablename__ = "ai_providers"
+class DBSettings(DBSettingsBase, table=True):
+    __tablename__ = "ai_settings"
     id: Annotated[uuid.UUID, Field(default_factory=uuid.uuid4, primary_key=True)]
     created_at: Annotated[datetime, Field(default_factory=datetime.now)]
     updated_at: Annotated[datetime, Field(default_factory=datetime.now, sa_column=Column(DateTime, onupdate=datetime.now))]
 
-class ProviderCreate(ProviderBase):
+class DBSettingsCreate(DBSettingsBase):
     pass
 
-class ProviderUpdate(ProviderBase):
-    base_url: Optional[str] = None
-    api_key: Optional[str] = None
-    model: Optional[str] = None
-    max_tokens: Optional[int] = None
-    enabled: Optional[bool] = None
+class DBSettingsUpdate(DBSettingsBase):
+    key: Optional[str] = None
+    value: Optional[str] = None
+    group: Optional[str] = None
+    order: Optional[int] = None
 
-class ProviderPublic(ProviderBase):
+class DBSettingsPublic(DBSettingsBase):
     id: uuid.UUID
     created_at: datetime
     updated_at: datetime
 
+class Provider(SQLModel):
+    base_url: Annotated[str, Field(description="API基础URL")]
+    api_key: Annotated[str, Field(description="API密钥")]
+    chat_model: Annotated[str, Field(description="聊天模型")]
+    chat_max_tokens: Annotated[int, Field(description="聊天最大Token数")]
+    chat_prompt: Annotated[str, Field(description="聊天提示")]
+    title_prompt: Annotated[str, Field(description="标题生成提示")]
+    title_max_tokens: Annotated[int, Field(description="标题生成最大Token数")]
+    title_model: Annotated[str, Field(description="标题生成模型")]
+
 class ProviderStore:
-    def __init__(self, db_engine: Engine):
-        self._db_engine = db_engine
+    def __init__(self, engine: Engine):
+        self._engine = engine
         self._lock = Lock()
-        self._provider: ProviderPublic | None = None
+        self._provider: Provider | None = None
         self.reload()
 
-    def get_provider(self) -> ProviderPublic:
+    def reload(self) -> Provider:
+        with self._lock:
+            with Session(self._engine) as session:
+                stmt = select(DBSettings).where(DBSettings.group == AI_PROVIDER_GROUP).order_by(DBSettings.order)
+                settings = session.exec(stmt).all()
+            self._provider = Provider.model_validate({setting.key: setting.value for setting in settings})
+            return self._provider
+
+    def get_provider(self) -> Provider:
         if not self._provider:
             self.reload()
         return self._provider
-
-    def reload(self) -> ProviderPublic:
-        with self._lock:
-            with Session(self._db_engine) as session:
-                stmt = select(Provider).where(Provider.enabled.is_(True)).order_by(Provider.created_at.desc())
-                provider = session.exec(stmt).first()
-                if not provider:
-                    raise ValueError("No available provider")
-                self._provider = ProviderPublic(**provider.model_dump())
-                return self._provider
 
 def get_anthropic_api(request: Request) -> Anthropic:
     state = cast(State, request.state)
